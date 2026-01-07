@@ -1,0 +1,2 @@
+"*.a3d" filter=lfs diff=lfs merge=lfs -text
+"*.m3d" filter=lfs diff=lfs merge=lfs -text
