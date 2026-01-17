@@ -1,10 +1,6 @@
-#ifndef WIFI_CONFIG_H
-#define WIFI_CONFIG_H
+#pragma once
 
 // Настройте здесь ваши данные WiFi
 // Скопируйте этот файл в wifi_config.h и заполните своими данными
-#define WIFI_SSID      "your_wifi_ssid"
-#define WIFI_PASS      "your_wifi_password"
-
-#endif // WIFI_CONFIG_H
-
+static char WIFI_SSID[] = "your_wifi_ssid";
+static char WIFI_PASS[] = "your_wifi_password";
