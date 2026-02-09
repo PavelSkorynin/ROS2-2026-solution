@@ -3,6 +3,3 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
-
-# WiFi credentials - не коммитить в репозиторий
-include/wifi_config.h
