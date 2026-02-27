@@ -10,7 +10,7 @@ from bleak import BleakClient, BleakScanner, BleakError
 
 SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # Write
-
+POWER = 127 # 100%
 
 async def find_device(address: str | None, name: str | None):
     if address:
@@ -39,22 +39,22 @@ def _compute_command(pressed: set[str]) -> tuple[int, int, int]:
 
     if forward:
         if left:
-            l, r = 32, 64
+            l, r = int(POWER / 2), int(POWER)
         elif right:
-            l, r = 64, 32
+            l, r = int(POWER), int(POWER / 2)
         else:
-            l, r = 64, 64
+            l, r = int(POWER), int(POWER)
     elif backward:
         if left:
-            l, r = -32, -64
+            l, r = int(-POWER / 2), int(-POWER)
         elif right:
-            l, r = -64, -32
+            l, r = int(-POWER), int(-POWER / 2)
         else:
-            l, r = -64, -64
+            l, r = int(-POWER), int(-POWER)
     elif left:
-        l, r = -64, 64
+        l, r = int(-POWER), int(POWER)
     elif right:
-        l, r = 64, -64
+        l, r = int(POWER), int(-POWER)
     else:
         l, r = 0, 0
 

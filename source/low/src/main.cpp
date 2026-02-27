@@ -3,7 +3,6 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-#include <FastAccelStepper.h>
 
 // Nordic UART Service UUIDs (common and easy to test against)
 static const char *kDeviceName = "esp32dev";
@@ -16,21 +15,23 @@ BLEAdvertising *g_advertising = nullptr;
 bool g_deviceConnected = false;
 uint32_t g_lastAdvRestartMs = 0;
 
-// A4988 pins
-static const int kLeftEnPin = 25;
-static const int kLeftStepPin = 26;
-static const int kLeftDirPin = 27;
-static const int kRightEnPin = 32;
-static const int kRightStepPin = 33;
-static const int kRightDirPin = 14;
+// DC motors JGA25-370 via L298N
+// Left motor
+static const int kLeftEnPin = 12;  // PWM
+static const int kLeftAPin = 14;   // IN1
+static const int kLeftBPin = 13;   // IN2
+// Right motor
+static const int kRightEnPin = 2;  // PWM
+static const int kRightAPin = 4;   // IN3
+static const int kRightBPin = 15;  // IN4
 
-static const int kMaxStepHz = 50; // max step frequency at power=127
-static const int kMinStepHz = 10;  // minimum frequency to start moving
-static const int kAccelHzPerSec = 2000; // ramp rate
-static const bool kStartupTest = true;
-static const int kTestSteps = 200;
-static const int kTestSpeedHz = 200;
-static const int kTestAccelHzPerSec = 800;
+// PWM configuration (ESP32 LEDC)
+static const int kLeftPwmChannel = 0;
+static const int kRightPwmChannel = 1;
+static const int kPwmFreq = 20000;       // 20 kHz to avoid audible noise
+static const int kPwmResolution = 8;     // 0..255
+
+static const bool kRightInverted = true;
 
 struct MotorCommand {
   int8_t left = 0;
@@ -40,10 +41,6 @@ struct MotorCommand {
 };
 
 MotorCommand g_cmd;
-
-FastAccelStepperEngine g_engine;
-FastAccelStepper *g_leftStepper = nullptr;
-FastAccelStepper *g_rightStepper = nullptr;
 
 portMUX_TYPE g_cmdMux = portMUX_INITIALIZER_UNLOCKED;
 volatile bool g_cmdPending = false;
@@ -59,51 +56,72 @@ static int clampAbsPower(int8_t power) {
   return p;
 }
 
-static int powerToFreq(int8_t power) {
+static uint8_t powerToPwm(int8_t power) {
   if (power == 0) {
     return 0;
   }
   int p = clampAbsPower(power);
-  int freq = (p * kMaxStepHz) / 127;
-  if (freq < kMinStepHz) {
-    freq = kMinStepHz;
+  int pwm = (p * 255) / 127;
+  if (pwm > 255) {
+    pwm = 255;
   }
-  return freq;
+  return static_cast<uint8_t>(pwm);
 }
 
-static void applyStepper(FastAccelStepper *stepper, int8_t power, int freq) {
-  if (stepper == nullptr) {
+static int8_t applyRightInversion(int8_t power) {
+  return kRightInverted ? static_cast<int8_t>(-power) : power;
+}
+
+static void applyMotor(int pwmChannel, int aPin, int bPin, int8_t power) {
+  uint8_t pwm = powerToPwm(power);
+  if (power == 0 || pwm == 0) {
+    // Brake / freewheel: no PWM, both direction pins LOW
+    ledcWrite(pwmChannel, 0);
+    digitalWrite(aPin, LOW);
+    digitalWrite(bPin, LOW);
     return;
   }
-  if (power == 0 || freq == 0) {
-    stepper->forceStopAndNewPosition(stepper->getCurrentPosition());
-    return;
-  }
-  stepper->setSpeedInHz(freq);
+
   if (power > 0) {
-    stepper->runForward();
+    digitalWrite(aPin, HIGH);
+    digitalWrite(bPin, LOW);
   } else {
-    stepper->runBackward();
+    digitalWrite(aPin, LOW);
+    digitalWrite(bPin, HIGH);
   }
+  ledcWrite(pwmChannel, pwm);
 }
 
-static void runStartupTest(FastAccelStepper *stepper, const char *name) {
-  if (stepper == nullptr) {
-    return;
-  }
-  Serial.printf("Test %s: +%d steps\n", name, kTestSteps);
-  stepper->setSpeedInHz(kTestSpeedHz);
-  stepper->setAcceleration(kTestAccelHzPerSec);
-  stepper->move(kTestSteps);
-  while (stepper->isRunning()) {
-    delay(1);
-  }
+static void applyLeftMotor(int8_t power) {
+  applyMotor(kLeftPwmChannel, kLeftAPin, kLeftBPin, power);
+}
+
+static void applyRightMotor(int8_t power) {
+  applyMotor(kRightPwmChannel, kRightAPin, kRightBPin, power);
+}
+
+static void motorSelfTest() {
+  Serial.println("Motor self-test start");
+
+  const int8_t testPower = 80;
+
+  // Left motor: forward then backward
+  applyLeftMotor(testPower);
+  delay(1000);
+  applyLeftMotor(-testPower);
+  delay(1000);
+  applyLeftMotor(0);
   delay(200);
-  Serial.printf("Test %s: -%d steps\n", name, kTestSteps);
-  stepper->move(-kTestSteps);
-  while (stepper->isRunning()) {
-    delay(1);
-  }
+
+  // Right motor: forward then backward
+  applyRightMotor(testPower);
+  delay(1000);
+  applyRightMotor(-testPower);
+  delay(1000);
+  applyRightMotor(0);
+  delay(200);
+
+  Serial.println("Motor self-test done");
 }
 
 class ServerCallbacks : public BLEServerCallbacks {
@@ -152,6 +170,29 @@ class RxCallbacks : public BLECharacteristicCallbacks {
 void setup() {
   Serial.begin(115200);
 
+  // Motor pins
+  pinMode(kLeftAPin, OUTPUT);
+  pinMode(kLeftBPin, OUTPUT);
+  pinMode(kRightAPin, OUTPUT);
+  pinMode(kRightBPin, OUTPUT);
+
+  // Configure PWM for motor enable pins
+  ledcSetup(kLeftPwmChannel, kPwmFreq, kPwmResolution);
+  ledcAttachPin(kLeftEnPin, kLeftPwmChannel);
+  ledcSetup(kRightPwmChannel, kPwmFreq, kPwmResolution);
+  ledcAttachPin(kRightEnPin, kRightPwmChannel);
+
+  // Ensure motors are stopped initially
+  applyLeftMotor(0);
+  applyRightMotor(0);
+
+  // Motor self-test: spin each motor in both directions for one second
+  motorSelfTest();
+
+  // Stop motors after self-test
+  applyLeftMotor(0);
+  applyRightMotor(0);
+
   BLEDevice::init(kDeviceName);
   BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
@@ -178,29 +219,6 @@ void setup() {
   g_lastAdvRestartMs = millis();
 
   Serial.println("BLE control service started");
-
-  g_engine.init();
-  g_leftStepper = g_engine.stepperConnectToPin(kLeftStepPin);
-  g_rightStepper = g_engine.stepperConnectToPin(kRightStepPin);
-
-  if (g_leftStepper != nullptr) {
-    g_leftStepper->setDirectionPin(kLeftDirPin);
-    g_leftStepper->setEnablePin(kLeftEnPin, true);
-    g_leftStepper->setAutoEnable(true);
-    g_leftStepper->setAcceleration(kAccelHzPerSec);
-  }
-
-  if (g_rightStepper != nullptr) {
-    g_rightStepper->setDirectionPin(kRightDirPin);
-    g_rightStepper->setEnablePin(kRightEnPin, true);
-    g_rightStepper->setAutoEnable(true);
-    g_rightStepper->setAcceleration(kAccelHzPerSec);
-  }
-
-  if (kStartupTest) {
-    runStartupTest(g_leftStepper, "left");
-    runStartupTest(g_rightStepper, "right");
-  }
 }
 
 void loop() {
@@ -210,7 +228,7 @@ void loop() {
     uint16_t time_ms = 0;
     portENTER_CRITICAL(&g_cmdMux);
     left = g_pendingLeft;
-    right = g_pendingRight;
+    right = applyRightInversion(g_pendingRight);
     time_ms = g_pendingTimeMs;
     g_cmdPending = false;
     portEXIT_CRITICAL(&g_cmdMux);
@@ -220,17 +238,19 @@ void loop() {
     g_cmd.end_ms = millis() + time_ms;
     g_cmd.active = (time_ms > 0) && (left != 0 || right != 0);
 
-    int left_hz = powerToFreq(left);
-    int right_hz = powerToFreq(right);
-    Serial.printf("left_hz=%d right_hz=%d\n", left_hz, right_hz);
-    applyStepper(g_leftStepper, left, left_hz);
-    applyStepper(g_rightStepper, right, right_hz);
+    uint8_t left_pwm = powerToPwm(left);
+    uint8_t right_pwm = powerToPwm(right);
+    Serial.printf("left_pwm=%u right_pwm=%u\n",
+                  static_cast<unsigned>(left_pwm),
+                  static_cast<unsigned>(right_pwm));
+    applyLeftMotor(left);
+    applyRightMotor(right);
   }
 
   if (g_cmd.active && millis() >= g_cmd.end_ms) {
     g_cmd.active = false;
-    applyStepper(g_leftStepper, 0, 0);
-    applyStepper(g_rightStepper, 0, 0);
+    applyLeftMotor(0);
+    applyRightMotor(0);
   }
   if (!g_deviceConnected && g_advertising != nullptr) {
     uint32_t now = millis();
