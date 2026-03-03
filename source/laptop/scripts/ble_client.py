@@ -10,7 +10,8 @@ from bleak import BleakClient, BleakScanner, BleakError
 
 SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  # Write
-POWER = 127 # 100%
+POWER = 90
+POWER_MIN = 80
 
 async def find_device(address: str | None, name: str | None):
     if address:
@@ -39,16 +40,16 @@ def _compute_command(pressed: set[str]) -> tuple[int, int, int]:
 
     if forward:
         if left:
-            l, r = int(POWER / 2), int(POWER)
+            l, r = int(POWER_MIN), int(POWER)
         elif right:
-            l, r = int(POWER), int(POWER / 2)
+            l, r = int(POWER), int(POWER_MIN)
         else:
             l, r = int(POWER), int(POWER)
     elif backward:
         if left:
-            l, r = int(-POWER / 2), int(-POWER)
+            l, r = int(-POWER_MIN), int(-POWER)
         elif right:
-            l, r = int(-POWER), int(-POWER / 2)
+            l, r = int(-POWER), int(-POWER_MIN)
         else:
             l, r = int(-POWER), int(-POWER)
     elif left:
@@ -58,7 +59,7 @@ def _compute_command(pressed: set[str]) -> tuple[int, int, int]:
     else:
         l, r = 0, 0
 
-    t = 500 if (l != 0 or r != 0) else 0
+    t = 50 if (l != 0 or r != 0) else 0
     return l, r, t
 
 
@@ -268,7 +269,7 @@ def main():
     parser = argparse.ArgumentParser(description="BLE robot control client")
     parser.add_argument("--address", help="BLE address of esp32dev")
     parser.add_argument("--name", default="esp32dev", help="BLE device name")
-    parser.add_argument("--interval", type=float, default=0.4, help="Send interval seconds")
+    parser.add_argument("--interval", type=float, default=0.03, help="Send interval seconds")
     parser.add_argument("--debug", action="store_true", help="Print key and command events")
     args = parser.parse_args()
 
